@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Multiplayer Game</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        background-color: #333;
+      }
+      canvas {
+        display: block;
+        background: #777;
+        border-radius: 0px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gameCanvas"></canvas>
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    <script>
+      const canvas = document.getElementById("gameCanvas");
+      const ctx = canvas.getContext("2d");
+
+      canvas.width = 1200;
+      canvas.height = 600;
+
+      const socket = io("http://localhost:3000");
+      const playerSpeed = 5;
+      const playerRadius = 15;
+      const enemyRadius = 25;
+      
+      class Enemy {
+        constructor(x, y, dx, dy) {
+          this.x = x;
+          this.y = y;
+          this.radius = enemyRadius;
+          this.color = "red";
+          this.dx = dx;
+          this.dy = dy;
+        }
+
+        update() {
+          this.x += this.dx;
+          this.y += this.dy;
+
+          if (this.x - this.radius <= 0 || this.x + this.radius >= canvas.width) {
+            this.dx = -this.dx;
+          }
+          if (this.y - this.radius <= 0 || this.y + this.radius >= canvas.height) {
+            this.dy = -this.dy;
+          }
+
+          // Отправляем обновленные позиции на сервер
+          return {
+            x: this.x,
+            y: this.y,
+            dx: this.dx,
+            dy: this.dy
+          };
+        }
+
+        draw() {
+          ctx.fillStyle = this.color;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      let enemies = [];
+      let players = {};
+      let isHost = false; // Флаг, указывающий, является ли этот клиент хостом
+      
+      const playerStates = {
+        // id: { isAlive: true/false }
+      };
+
+      const localPlayer = {
+        x: canvas.width / 2,
+        y: canvas.height / 2,
+        radius: playerRadius,
+        color: "blue",
+      };
+
+      const controls = {
+        up: ['w', 'ц', 'W', 'Ц', 'ArrowUp'],
+        down: ['s', 'ы', 'S', 'Ы', 'ArrowDown'],
+        left: ['a', 'ф', 'A', 'Ф', 'ArrowLeft'],
+        right: ['d', 'в', 'D', 'В', 'ArrowRight']
+      };
+
+      const keyStates = {
+        up: false,
+        down: false,
+        left: false,
+        right: false
+      };
+
+      socket.on("connect", () => {
+        playerStates[socket.id] = { isAlive: true };
+      });
+
+      // Получаем статус хоста от сервера
+      socket.on("hostStatus", (status) => {
+        isHost = status.isHost;
+        
+        // Если мы хост, создаем врагов и отправляем их начальные позиции
+        if (isHost) {
+          enemies = Array(5).fill(null).map(() => {
+            const x = Math.random() * (canvas.width - 2 * enemyRadius) + enemyRadius;
+            const y = Math.random() * (canvas.height - 2 * enemyRadius) + enemyRadius;
+            const dx = (Math.random() * 6 - 3) || 1;
+            const dy = (Math.random() * 6 - 3) || 1;
+            return new Enemy(x, y, dx, dy);
+          });
+          
+          // Отправляем начальные позиции врагов
+          socket.emit("initEnemies", enemies.map(enemy => ({
+            x: enemy.x,
+            y: enemy.y,
+            dx: enemy.dx,
+            dy: enemy.dy
+          })));
+        }
+      });
+
+      // Получаем начальные позиции врагов
+      socket.on("initEnemies", (enemiesData) => {
+        enemies = enemiesData.map(data => 
+          new Enemy(data.x, data.y, data.dx, data.dy)
+        );
+      });
+
+      // Получаем обновленные позиции врагов
+      socket.on("updateEnemies", (enemiesData) => {
+        enemiesData.forEach((data, index) => {
+          if (enemies[index]) {
+            enemies[index].x = data.x;
+            enemies[index].y = data.y;
+            enemies[index].dx = data.dx;
+            enemies[index].dy = data.dy;
+          }
+        });
+      });
+
+      socket.on("updatePlayers", (serverPlayers) => {
+        for (const id in serverPlayers) {
+          const boundedPosition = checkBoundaries(serverPlayers[id].x, serverPlayers[id].y);
+          serverPlayers[id].x = boundedPosition.x;
+          serverPlayers[id].y = boundedPosition.y;
+          
+          if (!playerStates[id]) {
+            playerStates[id] = { isAlive: true };
+          }
+        }
+        players = serverPlayers;
+      });
+
+      socket.on("playerStateUpdate", (states) => {
+        Object.assign(playerStates, states);
+      });
+
+      function checkBoundaries(newX, newY) {
+        return {
+          x: Math.max(playerRadius, Math.min(canvas.width - playerRadius, newX)),
+          y: Math.max(playerRadius, Math.min(canvas.height - playerRadius, newY))
+        };
+      }
+
+      function checkCollision(circle1, circle2) {
+        const dx = circle1.x - circle2.x;
+        const dy = circle1.y - circle2.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        return distance < circle1.radius + circle2.radius;
+      }
+
+      window.addEventListener("keydown", (e) => {
+        if (e.repeat) return;
+        const key = e.key;
+        if (controls.up.includes(key)) keyStates.up = true;
+        if (controls.down.includes(key)) keyStates.down = true;
+        if (controls.left.includes(key)) keyStates.left = true;
+        if (controls.right.includes(key)) keyStates.right = true;
+      });
+
+      window.addEventListener("keyup", (e) => {
+        const key = e.key;
+        if (controls.up.includes(key)) keyStates.up = false;
+        if (controls.down.includes(key)) keyStates.down = false;
+        if (controls.left.includes(key)) keyStates.left = false;
+        if (controls.right.includes(key)) keyStates.right = false;
+      });
+
+      function updatePlayerMovement() {
+        if (!playerStates[socket.id]?.isAlive) return;
+
+        let moveX = 0;
+        let moveY = 0;
+
+        if (keyStates.up && !keyStates.down) moveY -= playerSpeed;
+        if (keyStates.down && !keyStates.up) moveY += playerSpeed;
+        if (keyStates.left && !keyStates.right) moveX -= playerSpeed;
+        if (keyStates.right && !keyStates.left) moveX += playerSpeed;
+
+        if (moveX !== 0 && moveY !== 0) {
+          const normalizer = 1 / Math.sqrt(2);
+          moveX *= normalizer;
+          moveY *= normalizer;
+        }
+
+        if (moveX !== 0 || moveY !== 0) {
+          const currentPlayer = players[socket.id] || localPlayer;
+          const newX = currentPlayer.x + moveX;
+          const newY = currentPlayer.y + moveY;
+          const boundedPosition = checkBoundaries(newX, newY);
+          
+          moveX = boundedPosition.x - currentPlayer.x;
+          moveY = boundedPosition.y - currentPlayer.y;
+          
+          if (moveX !== 0 || moveY !== 0) {
+            socket.emit("move", { x: moveX, y: moveY });
+          }
+        }
+      }
+
+      function update() {
+        updatePlayerMovement();
+
+        // Только хост обновляет врагов и отправляет их позиции
+        if (isHost && enemies.length > 0) {
+          const enemiesData = enemies.map(enemy => enemy.update());
+          socket.emit("updateEnemies", enemiesData);
+        }
+
+        // Проверка столкновений
+        enemies.forEach(enemy => {
+          for (const id in players) {
+            const player = players[id];
+            if (playerStates[id]?.isAlive && checkCollision(enemy, player)) {
+              playerStates[id].isAlive = false;
+              socket.emit("playerStateUpdate", playerStates);
+            }
+          }
+        });
+
+        // Проверка столкновений между игроками
+        for (const id1 in players) {
+          for (const id2 in players) {
+            if (id1 !== id2 && playerStates[id1] && playerStates[id2]) {
+              const player1 = players[id1];
+              const player2 = players[id2];
+              
+              if (checkCollision(player1, player2)) {
+                if (playerStates[id1].isAlive !== playerStates[id2].isAlive) {
+                  if (!playerStates[id1].isAlive) playerStates[id1].isAlive = true;
+                  if (!playerStates[id2].isAlive) playerStates[id2].isAlive = true;
+                  socket.emit("playerStateUpdate", playerStates);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Отрисовка врагов
+        enemies.forEach(enemy => enemy.draw());
+
+        // Отрисовка игроков
+        for (const id in players) {
+          const player = players[id];
+          ctx.fillStyle = playerStates[id]?.isAlive ? "blue" : "gray";
+          ctx.beginPath();
+          ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Сообщение для мертвого игрока
+        if (socket.id && !playerStates[socket.id]?.isAlive) {
+          ctx.fillStyle = "white";
+          ctx.font = "24px Arial";
+          ctx.textAlign = "center";
+          ctx.fillText("Вы обездвижены! Найдите живого игрока для возрождения", 
+                      canvas.width / 2, 30);
+        }
+      }
+
+      function gameLoop() {
+        update();
+        draw();
+        requestAnimationFrame(gameLoop);
+      }
+
+      gameLoop();
+    </script>
+  </body>
+</html>
